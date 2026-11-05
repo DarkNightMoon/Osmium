@@ -1,17 +1,19 @@
-OSMIUM COMMAND SYSTEM
+OSMIUM updater patch
 
-This keeps the OSMIUM startup logo/boot page and does NOT open system information at startup.
-
-Install:
 1. Extract this ZIP.
-2. Open PowerShell in the extracted folder.
-3. Run:
-   powershell.exe -ExecutionPolicy Bypass -File .\Install-Osmium-Command-System.ps1
-4. Close and reopen PowerShell.
+2. Run PowerShell as your normal user.
+3. Execute:
+   powershell -ExecutionPolicy Bypass -File .\Add-OsmiumUpdater.ps1
 
-Commands:
-  osmium -h     Help / command index
-  osmium -sys   Live system information dashboard
-  Ctrl+C        Exit dashboard and return to OSMIUM prompt
+The patch edits D:\OSMIUM-Command-System\Osmium-Commands.ps1.
+Then test, commit and push the change:
+   . "$env:LOCALAPPDATA\OsmiumTerminal\Osmium-Commands.ps1"
+   osmium -h
+   git -C D:\OSMIUM-Command-System diff
+   git -C D:\OSMIUM-Command-System add Osmium-Commands.ps1
+   git -C D:\OSMIUM-Command-System commit -m "Add GitHub updater command"
+   git -C D:\OSMIUM-Command-System push
 
-The command dashboard refreshes once per second. NVIDIA GPU/VRAM/temperature data requires nvidia-smi.exe.
+After the change is pushed, `osmium -update` will fetch GitHub, require a clean local tree,
+fast-forward only, back up the installed runtime, and copy the banner/command module.
+Restart PowerShell after updating.
