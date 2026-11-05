@@ -186,6 +186,7 @@ function global:osmium {
             Write-Host " ----------------------------------------" -ForegroundColor DarkMagenta
             Write-Host " osmium -h       Display this help menu" -ForegroundColor White
             Write-Host " osmium -sys     Open live system monitor" -ForegroundColor White
+            Write-Host " osmium -update  Update OSMIUM from GitHub" -ForegroundColor White
             Write-Host " exit            Close the PowerShell session" -ForegroundColor White
             Write-Host ""
             Write-Host " More commands will be added here." -ForegroundColor DarkGray
@@ -208,4 +209,9 @@ function global:osmium {
         }
     }
 }
+
+
+
+
+
 
