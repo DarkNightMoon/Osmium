@@ -1,146 +1,47 @@
 ﻿$ErrorActionPreference = "Stop"
-
-$project = "D:\OSMIUM-Command-System"
+$project = $PSScriptRoot
 $commandsFile = Join-Path $project "Osmium-Commands.ps1"
 $installerFile = Join-Path $project "Install-Osmium-Command-System.ps1"
-
-if (-not (Test-Path $commandsFile)) {
-    throw "Cannot find $commandsFile. Run this patch from the expected OSMIUM project layout."
-}
-
-$source = Get-Content -LiteralPath $commandsFile -Raw
-
-if ($source -match 'function\s+Invoke-OsmiumUpdate') {
-    Write-Host "Updater function already exists in the project." -ForegroundColor Yellow
-    exit 0
-}
-
-$functionCode = @'
-function Invoke-OsmiumUpdate {
-    $projectPath = "D:\OSMIUM-Command-System"
-    $runtimePath = Join-Path $env:LOCALAPPDATA "OsmiumTerminal"
-    $remote = "origin"
-    $branch = "main"
-
-    Write-Host "`nOSMIUM // UPDATE SERVICE" -ForegroundColor Magenta
-
-    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
-        Write-Host "Git is not installed or not on PATH." -ForegroundColor Red
-        return
-    }
-    if (-not (Test-Path (Join-Path $projectPath ".git"))) {
-        Write-Host "Development repository not found: $projectPath" -ForegroundColor Red
-        return
-    }
-
-    $status = & git -C $projectPath status --porcelain
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Could not inspect Git working tree." -ForegroundColor Red
-        return
-    }
-    if ($status) {
-        Write-Host "Update stopped: local project has uncommitted changes." -ForegroundColor Yellow
-        Write-Host "Commit or stash them, then run osmium -update again." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "[1/4] Checking GitHub..." -ForegroundColor Gray
-    & git -C $projectPath fetch $remote $branch
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Fetch failed. Check internet access and GitHub authentication." -ForegroundColor Red
-        return
-    }
-
-    $counts = & git -C $projectPath rev-list --left-right --count "HEAD...$remote/$branch"
-    if ($LASTEXITCODE -ne 0 -or -not $counts) {
-        Write-Host "Could not compare local and remote versions." -ForegroundColor Red
-        return
-    }
-    $parts = ($counts -split '\s+')
-    $ahead = [int]$parts[0]
-    $behind = [int]$parts[1]
-
-    if ($behind -eq 0) {
-        if ($ahead -gt 0) {
-            Write-Host "Your local branch is $ahead commit(s) ahead of GitHub. Push your changes first." -ForegroundColor Yellow
-        } else {
-            Write-Host "OSMIUM is already up to date." -ForegroundColor Green
-        }
-        return
-    }
-    if ($ahead -gt 0) {
-        Write-Host "Update stopped: local and remote branches have diverged. Reconcile Git history first." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "[2/4] Backing up installed runtime..." -ForegroundColor Gray
-    if (Test-Path $runtimePath) {
-        $backupRoot = Join-Path $env:LOCALAPPDATA "OsmiumBackups"
-        New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $backup = Join-Path $backupRoot "Osmium-$stamp"
-        Copy-Item -LiteralPath $runtimePath -Destination $backup -Recurse -Force
-        Write-Host "Backup: $backup" -ForegroundColor DarkGray
-    }
-
-    Write-Host "[3/4] Updating project from GitHub..." -ForegroundColor Gray
-    & git -C $projectPath pull --ff-only $remote $branch
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Git pull failed. Installed runtime was not changed." -ForegroundColor Red
-        return
-    }
-
-    Write-Host "[4/4] Installing updated OSMIUM files..." -ForegroundColor Gray
-    New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
-    $allowed = @("Osmium-Banner.ps1", "Osmium-Commands.ps1")
-    foreach ($name in $allowed) {
-        $from = Join-Path $projectPath $name
-        if (Test-Path $from) {
-            Copy-Item -LiteralPath $from -Destination (Join-Path $runtimePath $name) -Force
-        }
-    }
-
-    Write-Host "OSMIUM updated successfully." -ForegroundColor Green
-    Write-Host "Restart PowerShell to load the updated command module." -ForegroundColor Cyan
-}
-'@
-
-# Add updater function before the public command dispatcher.
-$marker = 'function global:osmium {'
-if (-not $source.Contains($marker)) {
-    throw "Could not locate the osmium command dispatcher. No changes were made."
-}
-$source = $source.Replace($marker, $functionCode + "`r`n`r`n" + $marker)
-
-# Add the command to the help menu.
-$helpLine = 'Write-Host " osmium -sys Open live system monitor" -ForegroundColor White'
-if ($source.Contains($helpLine) -and $source -notmatch 'osmium -update') {
-    $source = $source.Replace($helpLine, $helpLine + "`r`nWrite-Host `" osmium -update Check GitHub and update installed OSMIUM`" -ForegroundColor White")
-}
-
-# Add the command branch to the dispatcher.
-$defaultMarker = '        default {'
-if (-not $source.Contains('"-update"')) {
-    if (-not $source.Contains($defaultMarker)) {
-        throw "Could not locate command switch default branch. No changes were made."
-    }
-    $source = $source.Replace($defaultMarker, @'
-        "-update" {
-            Invoke-OsmiumUpdate
-        }
-        default {
-'@)
-}
-
-Set-Content -LiteralPath $commandsFile -Value $source -Encoding UTF8
-
-# Ensure future installations include the updated command module in runtime.
-if (Test-Path $installerFile) {
-    $installer = Get-Content -LiteralPath $installerFile -Raw
-    if ($installer -notmatch 'Osmium-Commands\.ps1') {
-        Write-Warning "Installer did not contain the expected module-copy rule. Review it manually."
-    }
-}
-
-Write-Host "`nUpdater added to project source." -ForegroundColor Green
-Write-Host "Next: test syntax, commit, and push the change to GitHub." -ForegroundColor Cyan
+$updaterFile = Join-Path $project "Osmium-Updater.ps1"
+foreach ($file in @($commandsFile,$installerFile,$updaterFile)) { if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required project file missing: $file" } }
+$updaterSource = [IO.File]::ReadAllText($updaterFile)
+$updaterTokens = $null; $updaterErrors = $null
+$updaterAst = [System.Management.Automation.Language.Parser]::ParseInput($updaterSource,[ref]$updaterTokens,[ref]$updaterErrors)
+if ($updaterErrors.Count -gt 0) { throw "Standalone updater syntax invalid." }
+$updaterDefinitions = @($updaterAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Invoke-OsmiumUpdate" },$true))
+if ($updaterDefinitions.Count -ne 1) { throw "Expected exactly one standalone updater definition; found $($updaterDefinitions.Count)." }
+$commands = [IO.File]::ReadAllText($commandsFile)
+$tokens = $null; $errors = $null
+$commandsAst = [System.Management.Automation.Language.Parser]::ParseInput($commands,[ref]$tokens,[ref]$errors)
+if ($errors.Count -gt 0) { throw "Command module syntax invalid." }
+$embedded = @($commandsAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Invoke-OsmiumUpdate" },$true))
+if ($embedded.Count -gt 1) { throw "Multiple embedded updater definitions found; manual review required." }
+$commandsChanged = $false
+if ($embedded.Count -eq 1) { $start = $embedded[0].Extent.StartOffset; $end = $embedded[0].Extent.EndOffset; $commands = $commands.Remove($start,$end - $start); $commandsChanged = $true }
+$loaderText = '. (Join-Path $PSScriptRoot "Osmium-Updater.ps1")'
+$loaderCount = ([regex]::Matches($commands,[regex]::Escape($loaderText))).Count
+if ($loaderCount -gt 1) { throw "Multiple standalone updater loaders found." }
+if ($loaderCount -eq 0) { $anchor = '. (Join-Path $PSScriptRoot "Osmium-AI-Server.ps1")'; if (-not $commands.Contains($anchor)) { throw "Module import anchor missing; command file unchanged." }; $commands = $commands.Replace($anchor,$anchor + "`r`n" + $loaderText); $commandsChanged = $true }
+$dispatchCount = ([regex]::Matches($commands,'(?m)^\s*"-update"\s*\{')).Count
+if ($dispatchCount -ne 1) { throw "Expected exactly one -update dispatcher branch; found $dispatchCount." }
+$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($commands,[ref]$tokens,[ref]$errors)
+if ($errors.Count -gt 0) { throw "Patched command module syntax invalid." }
+$installer = [IO.File]::ReadAllText($installerFile)
+$manifestMatch = [regex]::Match($installer,'(?m)^\s*\$requiredFiles\s*=\s*@\((?<items>[^)]*)\)')
+if (-not $manifestMatch.Success) { throw "Installer required-file manifest not found." }
+$installerChanged = $false
+if ($manifestMatch.Groups["items"].Value -notmatch '"Osmium-Updater\.ps1"') { $old = '"Osmium-Audit.ps1")'; $new = '"Osmium-Audit.ps1","Osmium-Updater.ps1")'; if (-not $installer.Contains($old)) { throw "Installer manifest anchor missing; manual review required." }; $installer = $installer.Replace($old,$new); $installerChanged = $true }
+$tokens = $null; $errors = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($installer,[ref]$tokens,[ref]$errors)
+if ($errors.Count -gt 0) { throw "Installer syntax invalid." }
+$stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+if ($commandsChanged) { Copy-Item -LiteralPath $commandsFile -Destination ($commandsFile + ".pre-patcher-" + $stamp) -ErrorAction Stop }
+if ($installerChanged) { Copy-Item -LiteralPath $installerFile -Destination ($installerFile + ".pre-patcher-" + $stamp) -ErrorAction Stop }
+$encoding = New-Object System.Text.UTF8Encoding($true)
+if ($commandsChanged) { [IO.File]::WriteAllText($commandsFile,$commands,$encoding) }
+if ($installerChanged) { [IO.File]::WriteAllText($installerFile,$installer,$encoding) }
+Write-Host "OSMIUM updater integration verified." -ForegroundColor Green
+Write-Host "Embedded updater removed: $($embedded.Count -eq 1)" -ForegroundColor Gray
+Write-Host "Standalone loader count: 1" -ForegroundColor Gray
+Write-Host "Update dispatcher count: 1" -ForegroundColor Gray
+Write-Host "Installer includes standalone updater: True" -ForegroundColor Gray
+if (-not $commandsChanged -and -not $installerChanged) { Write-Host "No changes required; integration is already canonical." -ForegroundColor Cyan }

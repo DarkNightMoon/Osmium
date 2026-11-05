@@ -2,6 +2,7 @@
 . (Join-Path $PSScriptRoot "Osmium-Fetch.ps1")
 . (Join-Path $PSScriptRoot "Osmium-AI.ps1")
 . (Join-Path $PSScriptRoot "Osmium-AI-Server.ps1")
+. (Join-Path $PSScriptRoot "Osmium-Updater.ps1")
 function global:prompt {
     $path = (Get-Location).Path
     $p = "$([char]27)[38;2;190;140;255m"
@@ -91,93 +92,7 @@ function Show-OsmiumSystem {
     }
 }
 
-function Invoke-OsmiumUpdate {
-    $projectPath = "D:\OSMIUM-Command-System"
-    $runtimePath = Join-Path $env:LOCALAPPDATA "OsmiumTerminal"
-    $remote = "origin"
-    $branch = "main"
 
-    Write-Host "`nOSMIUM // UPDATE SERVICE" -ForegroundColor Magenta
-
-    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
-        Write-Host "Git is not installed or not on PATH." -ForegroundColor Red
-        return
-    }
-    if (-not (Test-Path (Join-Path $projectPath ".git"))) {
-        Write-Host "Development repository not found: $projectPath" -ForegroundColor Red
-        return
-    }
-
-    $status = & git -C $projectPath status --porcelain
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Could not inspect Git working tree." -ForegroundColor Red
-        return
-    }
-    if ($status) {
-        Write-Host "Update stopped: local project has uncommitted changes." -ForegroundColor Yellow
-        Write-Host "Commit or stash them, then run osmium -update again." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "[1/4] Checking GitHub..." -ForegroundColor Gray
-    & git -C $projectPath fetch $remote $branch
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Fetch failed. Check internet access and GitHub authentication." -ForegroundColor Red
-        return
-    }
-
-    $counts = & git -C $projectPath rev-list --left-right --count "HEAD...$remote/$branch"
-    if ($LASTEXITCODE -ne 0 -or -not $counts) {
-        Write-Host "Could not compare local and remote versions." -ForegroundColor Red
-        return
-    }
-    $parts = ($counts -split '\s+')
-    $ahead = [int]$parts[0]
-    $behind = [int]$parts[1]
-
-    if ($behind -eq 0) {
-        if ($ahead -gt 0) {
-            Write-Host "Your local branch is $ahead commit(s) ahead of GitHub. Push your changes first." -ForegroundColor Yellow
-        } else {
-            Write-Host "OSMIUM is already up to date." -ForegroundColor Green
-        }
-        return
-    }
-    if ($ahead -gt 0) {
-        Write-Host "Update stopped: local and remote branches have diverged. Reconcile Git history first." -ForegroundColor Yellow
-        return
-    }
-
-    Write-Host "[2/4] Backing up installed runtime..." -ForegroundColor Gray
-    if (Test-Path $runtimePath) {
-        $backupRoot = Join-Path $env:LOCALAPPDATA "OsmiumBackups"
-        New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
-        $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $backup = Join-Path $backupRoot "Osmium-$stamp"
-        Copy-Item -LiteralPath $runtimePath -Destination $backup -Recurse -Force
-        Write-Host "Backup: $backup" -ForegroundColor DarkGray
-    }
-
-    Write-Host "[3/4] Updating project from GitHub..." -ForegroundColor Gray
-    & git -C $projectPath pull --ff-only $remote $branch
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Git pull failed. Installed runtime was not changed." -ForegroundColor Red
-        return
-    }
-
-    Write-Host "[4/4] Installing updated OSMIUM files..." -ForegroundColor Gray
-    New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
-    $allowed = @("Osmium-Banner.ps1", "Osmium-Commands.ps1", "Osmium-Fetch.ps1", "Osmium-AI.ps1", "Osmium-AI-Server.ps1")
-    foreach ($name in $allowed) {
-        $from = Join-Path $projectPath $name
-        if (Test-Path $from) {
-            Copy-Item -LiteralPath $from -Destination (Join-Path $runtimePath $name) -Force
-        }
-    }
-
-    Write-Host "OSMIUM updated successfully." -ForegroundColor Green
-    Write-Host "Restart PowerShell to load the updated command module." -ForegroundColor Cyan
-}
 
 function global:osmium {
     param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Arguments)
@@ -212,8 +127,12 @@ function global:osmium {
             Show-OsmiumFetch
         }
         "-ai" {
-            $request = ($Arguments | Select-Object -Skip 1) -join " "
-            Invoke-OsmiumAI -Request $request
+            $request = if ($Arguments.Count -gt 1) { ($Arguments | Select-Object -Skip 1) -join " " } else { Read-Host "Enter your question" }
+            if ([string]::IsNullOrWhiteSpace($request)) {
+                Write-Host "AI request cannot be empty." -ForegroundColor Yellow
+            } else {
+                Invoke-OsmiumAI -Request $request
+            }
         }
         "-ai-status" {
             Test-OsmiumAIConnection

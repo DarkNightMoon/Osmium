@@ -1,4 +1,5 @@
-﻿. (Join-Path $PSScriptRoot "Osmium-Policy.ps1")
+. (Join-Path $PSScriptRoot "Osmium-Policy.ps1")
+. (Join-Path $PSScriptRoot "Osmium-Transactions.ps1")
 function Resolve-OsmiumAIPath { param([string]$Path,[string]$DefaultFolder='Desktop'); if([string]::IsNullOrWhiteSpace($Path)){$Path=[Environment]::GetFolderPath($DefaultFolder)}; switch -Regex ($Path.Trim()) { '^(?i:documents|downloads|desktop)$' { $name=$_.ToLowerInvariant(); if($name -eq 'documents'){return [Environment]::GetFolderPath('MyDocuments')}; return (Join-Path $env:USERPROFILE $name) }; '^[A-Za-z]$' { return ($Path.ToUpperInvariant()+':\') }; default { return [Environment]::ExpandEnvironmentVariables($Path) } } }
 
 # OSMIUM // LOCAL INTELLIGENCE
@@ -106,7 +107,7 @@ function Invoke-OsmiumAITool {
                     default { "Other"; break }
                 }
             }
-            Write-Host " ORGANISATION PREVIEW — no files moved" -ForegroundColor Magenta
+            Write-Host " ORGANISATION PREVIEW â€” no files moved" -ForegroundColor Magenta
             foreach ($group in $groups) {
                 Write-Host (" {0,-14} {1,4} file(s)" -f $group.Name, $group.Count) -ForegroundColor White
             }
@@ -123,19 +124,27 @@ function Invoke-OsmiumAITool {
             if (-not $allowed) { throw "POLICY DENIED: Folder creation is restricted to Documents, Desktop, and Downloads." }
             $cursor = [IO.DirectoryInfo]$fullPath
             while ($null -ne $cursor) { if (Test-Path -LiteralPath $cursor.FullName) { $item = Get-Item -LiteralPath $cursor.FullName -Force; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "POLICY DENIED: Destination contains a junction or symbolic link." } }; $cursor = $cursor.Parent }
-            if (Test-Path -LiteralPath $fullPath) {
-                Write-Host "Already exists: $fullPath" -ForegroundColor Yellow
-                return
-            }
+            if (Test-Path -LiteralPath $fullPath) { Write-Host "Already exists: $fullPath" -ForegroundColor Yellow; return }
             Write-Host "OSMIUM wants to create: $fullPath" -ForegroundColor Yellow
-            if (Confirm-OsmiumOperation -Tool $tool -Target $fullPath) {
-
-                New-Item -ItemType Directory -Path $fullPath -Force -ErrorAction Stop | Out-Null
-                if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { throw "Folder creation could not be verified." }
-                Write-Host "Folder created: $fullPath" -ForegroundColor Green
-            } else {
-                Write-Host "Cancelled. No changes made." -ForegroundColor DarkGray
-            }
+            $approval = Request-OsmiumApproval -Tool $tool -Target $fullPath -Arguments $argsObject; if ($approval.Approved) {
+                $tx = $null; $created = $false; try { $tx = New-OsmiumTransaction -Tool "create_folder" -Target $fullPath
+                    if (-not (Test-Path -LiteralPath ([IO.Directory]::GetParent($fullPath).FullName) -PathType Container)) { throw "Parent directory must already exist; automatic parent creation is disabled." }; New-Item -ItemType Directory -Path $fullPath -ErrorAction Stop | Out-Null
+                    $created = $true; Register-OsmiumCreatedFolder -Record $tx
+                    Set-OsmiumTransactionState -Record $tx -State "Applied"
+                    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { throw "Folder creation could not be verified." }; Write-OsmiumAuditEvent -EventType "EXECUTION" -Tool $tool -Target $fullPath -Risk $approval.Risk -Fingerprint $approval.Fingerprint -Decision "Approved" -Outcome "Success" -TransactionId $tx.Id -Details "Folder creation verified" | Out-Null
+                    Write-Host "Folder created: $fullPath" -ForegroundColor Green
+                } catch {
+                    $failure = $_.Exception.Message; try { Write-OsmiumAuditEvent -EventType "EXECUTION" -Tool $tool -Target $fullPath -Risk $approval.Risk -Fingerprint $approval.Fingerprint -Decision "Approved" -Outcome "Failure" -TransactionId $(if ($null -ne $tx) { $tx.Id } else { "" }) -Details $failure | Out-Null } catch { Write-Host "EXECUTION AUDIT FAILURE: $($_.Exception.Message)" -ForegroundColor Red }
+                    if ($created) {
+                        try {
+                            $rolledBack = Undo-OsmiumCreatedFolder -Record $tx
+                            if ($rolledBack) { Write-OsmiumAuditEvent -EventType "ROLLBACK" -Tool $tool -Target $fullPath -Risk $approval.Risk -Fingerprint $approval.Fingerprint -Decision "Automatic" -Outcome "Success" -TransactionId $tx.Id -Details "Verified empty folder removed" | Out-Null; Write-Host "Automatic rollback completed." -ForegroundColor Green } else { Write-OsmiumAuditEvent -EventType "ROLLBACK" -Tool $tool -Target $fullPath -Risk $approval.Risk -Fingerprint $approval.Fingerprint -Decision "Automatic" -Outcome "Blocked" -TransactionId $tx.Id -Details $tx.RollbackMessage | Out-Null; Write-Host "ROLLBACK BLOCKED: Folder was preserved. Check transaction journal." -ForegroundColor Yellow }
+                        } catch { $rollbackFailure=$_.Exception.Message; try { Set-OsmiumTransactionState -Record $tx -State "RecoveryRequired" -Message $rollbackFailure } catch { Write-Host "TRANSACTION RECOVERY STATE FAILURE: $($_.Exception.Message)" -ForegroundColor Red }; try { Write-OsmiumAuditEvent -EventType "ROLLBACK" -Tool $tool -Target $fullPath -Risk $approval.Risk -Fingerprint $approval.Fingerprint -Decision "Automatic" -Outcome "Error" -TransactionId $tx.Id -Details $rollbackFailure | Out-Null } catch { Write-Host "ROLLBACK AUDIT FAILURE: $($_.Exception.Message)" -ForegroundColor Red }; Write-Host "ROLLBACK ERROR: $rollbackFailure. Manual inspection required." -ForegroundColor Red }
+                    }
+                    if (-not $created -and $null -ne $tx) { try { Set-OsmiumTransactionState -Record $tx -State "Failed" -Message $failure } catch { Write-Host "TRANSACTION STATE FAILURE: $($_.Exception.Message)" -ForegroundColor Red } }
+                    throw "Folder creation failed: $failure"
+                }
+            } else { Write-Host "Cancelled. No changes made." -ForegroundColor DarkGray }
         }
         default {
             throw "OSMIUM rejected an unknown tool: '$tool'. No action was executed."
@@ -170,6 +179,17 @@ AVAILABLE TOOLS:
 - organise_preview: preview file organisation; args {"path":"directory path or empty"}. Never move or modify files.
 - create_folder: create a folder; args {"path":"full folder path"}. User confirmation is required.
 
+TOOL ROUTING RULES:
+1. Default to respond for ordinary conversation, factual questions, definitions, explanations, advice, and general knowledge.
+2. Use system_status only when the user explicitly asks about this computer, its hardware, operating system, uptime, memory usage, or system resources.
+3. Use find_large_files only when the user asks to locate or list unusually large files.
+4. Use search_files only when the user asks to find files by filename or filename fragment.
+5. Use organise_preview only when the user explicitly asks to preview or plan file organisation.
+6. Use create_folder only when the user explicitly asks to create a directory.
+7. Never select a system tool merely because the question mentions computers, software, files, or technology.
+8. If no system operation is explicitly requested, select respond with empty args.
+9. Examples: 'What is ChatGPT?' -> respond; 'How much RAM is in use?' -> system_status; 'Find files larger than 1 GB' -> find_large_files; 'Search for report.xlsx' -> search_files.
+
 STRICT RESTRICTIONS:
 1. You cannot install or uninstall software.
 2. You cannot execute arbitrary PowerShell, CMD, or scripts.
@@ -188,7 +208,8 @@ Choose exactly one available tool per request.
     $body = @{
         model = $config.Model
         temperature = 0.1
-        max_tokens = 220
+        max_tokens = 320
+        response_format = @{ type = "json_schema"; json_schema = @{ name = "osmium_tool_plan"; strict = $true; schema = @{ type = "object"; properties = @{ tool = @{ type = "string"; enum = @("respond","system_status","find_large_files","search_files","organise_preview","create_folder") }; args = @{ type = "object"; additionalProperties = $true }; message = @{ type = "string" } }; required = @("tool","args","message"); additionalProperties = $false } } }
         messages = @(
             @{ role = "system"; content = $systemPrompt },
             @{ role = "user"; content = $Request }

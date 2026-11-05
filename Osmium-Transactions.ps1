@@ -1,0 +1,34 @@
+# OSMIUM TRANSACTION MANAGER
+$script:OsmiumTransactionRoot=Join-Path $env:LOCALAPPDATA "OsmiumTerminal\transactions"
+$script:OsmiumCreatedFolderProof=@{}
+function Write-OsmiumTransactionRecord { param($Record) if(-not(Test-Path -LiteralPath $script:OsmiumTransactionRoot)){New-Item -ItemType Directory -Path $script:OsmiumTransactionRoot -Force -ErrorAction Stop|Out-Null}; $file=Join-Path $script:OsmiumTransactionRoot ($Record.Id+".json"); $temp=$file+"."+[guid]::NewGuid().ToString("N")+".tmp"; $json=$Record|ConvertTo-Json -Depth 5; try{[IO.File]::WriteAllText($temp,$json,[Text.UTF8Encoding]::new($true)); if(Test-Path -LiteralPath $file){[IO.File]::Replace($temp,$file,($file+".bak")); if(Test-Path -LiteralPath ($file+".bak")){Remove-Item -LiteralPath ($file+".bak") -Force}}else{[IO.File]::Move($temp,$file)}}finally{if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue}} }
+function New-OsmiumTransaction { param([string]$Tool,[string]$Target) $record=[pscustomobject]@{Id=[guid]::NewGuid().ToString("N");Tool=$Tool;Target=[IO.Path]::GetFullPath($Target);State="Prepared";CreatedUtc=[DateTime]::UtcNow.ToString("o");UpdatedUtc=[DateTime]::UtcNow.ToString("o");RollbackMessage=""}; Write-OsmiumTransactionRecord $record; return $record }
+function Set-OsmiumTransactionState { param($Record,[string]$State,[string]$Message="") $Record.State=$State; $Record.UpdatedUtc=[DateTime]::UtcNow.ToString("o"); $Record.RollbackMessage=$Message; Write-OsmiumTransactionRecord $Record }
+function Register-OsmiumCreatedFolder { param($Record) if($Record.Tool -ne "create_folder"){throw "Creation proof denied: unsupported tool."}; $script:OsmiumCreatedFolderProof[$Record.Id]=[IO.Path]::GetFullPath([string]$Record.Target) }
+function Undo-OsmiumCreatedFolder { param($Record) if($Record.Tool -ne "create_folder" -or $Record.State -ne "Applied"){throw "Rollback denied: transaction is not an applied folder creation."}; $target=[IO.Path]::GetFullPath([string]$Record.Target); if(-not $script:OsmiumCreatedFolderProof.ContainsKey([string]$Record.Id) -or -not [string]::Equals([string]$script:OsmiumCreatedFolderProof[[string]$Record.Id],$target,[StringComparison]::OrdinalIgnoreCase)){throw "Rollback denied: no matching creation proof exists in this session."}; if(-not(Test-Path -LiteralPath $target -PathType Container)){Set-OsmiumTransactionState $Record "RollbackBlocked" "Created folder is missing or is not a directory."; return $false}; $item=Get-Item -LiteralPath $target -Force -ErrorAction Stop; if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){Set-OsmiumTransactionState $Record "RollbackBlocked" "Folder is a reparse point."; return $false}; if([IO.Directory]::GetFileSystemEntries($target).Count -ne 0){Set-OsmiumTransactionState $Record "RollbackBlocked" "Folder is not empty; contents were preserved."; return $false}; [IO.Directory]::Delete($target,$false); if(Test-Path -LiteralPath $target){Set-OsmiumTransactionState $Record "RollbackBlocked" "Deletion verification failed."; return $false}; Set-OsmiumTransactionState $Record "RolledBack" "Verified session-created empty folder removed."; $script:OsmiumCreatedFolderProof.Remove([string]$Record.Id)|Out-Null; return $true }
+
+function Get-OsmiumRecoveryReport {
+    $root=$script:OsmiumTransactionRoot;$records=@();$seen=@{}
+    $downloads="";try{$k=Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" -ErrorAction Stop;$downloads=[Environment]::ExpandEnvironmentVariables([string]$k.'{374DE290-123F-4565-9164-39C4925E467B}')}catch{}
+    $roots=@([Environment]::GetFolderPath("MyDocuments"),[Environment]::GetFolderPath("Desktop"),$downloads)|Where-Object {-not [string]::IsNullOrWhiteSpace($_)}
+    if(-not(Test-Path -LiteralPath $root -PathType Container)){return}
+    foreach($file in (Get-ChildItem -LiteralPath $root -Filter "*.json" -File -ErrorAction Stop)){
+        $id=$file.BaseName;$state="CORRUPT";$target="";$exists=$false;$isDir=$false;$reparse=$false;$count=-1;$allowed=$false;$classification="ManualReview_CorruptJournal"
+        try {
+            $r=Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+            $id=[string]$r.Id;$state=[string]$r.State;$validId=($id -match "^[a-fA-F0-9]{32}$" -and [string]::Equals($id,$file.BaseName,[StringComparison]::OrdinalIgnoreCase));$validTool=($r.Tool -eq "create_folder");$validState=($state -in @("Prepared","Applied","RolledBack","RollbackBlocked","Failed","RecoveryRequired","ManualReview"));$validFields=($r.PSObject.Properties.Name -contains "Target" -and $r.PSObject.Properties.Name -contains "CreatedUtc" -and -not [string]::IsNullOrWhiteSpace([string]$r.Target))
+            if(-not $validId -or -not $validTool -or -not $validState -or -not $validFields){$classification="ManualReview_InvalidJournal"}else{
+                $target=[IO.Path]::GetFullPath([string]$r.Target)
+                foreach($base in $roots){$b=[IO.Path]::GetFullPath($base).TrimEnd("\")+"\";if($target.StartsWith($b,[StringComparison]::OrdinalIgnoreCase)){$allowed=$true;break}}
+                $exists=Test-Path -LiteralPath $target;$item=$null;$cursor=[IO.DirectoryInfo]$target
+                while($null -ne $cursor){if(Test-Path -LiteralPath $cursor.FullName){$part=Get-Item -LiteralPath $cursor.FullName -Force -ErrorAction Stop;if(($part.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$reparse=$true}};$cursor=$cursor.Parent}
+                if($exists){$item=Get-Item -LiteralPath $target -Force -ErrorAction Stop;$isDir=$item.PSIsContainer;if($isDir -and -not $reparse){$count=[IO.Directory]::GetFileSystemEntries($target).Count}}
+                if(-not $allowed){$classification="ManualReview_OutsideApprovedRoots"}elseif($reparse){$classification="ManualReview_ReparsePoint"}else{$classification=switch($state){"Prepared"{if($exists){"ManualReview_PreparedTargetExists"}else{"ManualReview_PreparedTargetMissing"}}"Applied"{"Preserve_Applied"}"RolledBack"{if($exists){"ManualReview_RolledBackTargetExists"}else{"Consistent_RolledBack"}}"RollbackBlocked"{"Preserve_RollbackBlocked"}"Failed"{"ManualReview_Failed"}default{"ManualReview_State"}}}
+                if($target){$key=$target.ToLowerInvariant();if(-not $seen.ContainsKey($key)){$seen[$key]=0};$seen[$key]++}
+            }
+        }catch{$classification="ManualReview_CorruptJournal"}
+        $records+= [pscustomobject]@{Id=$id;State=$state;Target=$target;TargetExists=$exists;IsDirectory=$isDir;IsReparsePoint=$reparse;EntryCount=$count;PathAllowed=$allowed;DuplicateTarget=$false;Classification=$classification}
+    }
+    foreach($record in $records){if($record.Target -and $seen[$record.Target.ToLowerInvariant()] -gt 1){$record.DuplicateTarget=$true;$record.Classification="ManualReview_DuplicateTarget"}}
+    return $records
+}

@@ -1,8 +1,12 @@
 ﻿$ErrorActionPreference = "Stop"
 $root = Join-Path $env:LOCALAPPDATA "OsmiumTerminal"
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-Copy-Item "$PSScriptRoot\Osmium-Banner.ps1" "$root\Osmium-Banner.ps1" -Force
-Copy-Item "$PSScriptRoot\Osmium-Commands.ps1" "$root\Osmium-Commands.ps1" -Force
+$requiredFiles = @("Osmium-Banner.ps1","Osmium-Commands.ps1","Osmium-Fetch.ps1","Osmium-AI.ps1","Osmium-AI-Server.ps1","Osmium-Policy.ps1","Osmium-Transactions.ps1","Osmium-Audit.ps1","Osmium-Updater.ps1")
+foreach ($name in $requiredFiles) {
+    $source = Join-Path $PSScriptRoot $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required OSMIUM module missing: $name" }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $root $name) -Force
+}
 
 $docs = [Environment]::GetFolderPath("MyDocuments")
 $profilePath = Join-Path $docs "WindowsPowerShell\Microsoft.PowerShell_profile.ps1"
