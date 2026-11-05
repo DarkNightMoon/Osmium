@@ -1,4 +1,5 @@
 ﻿# OSMIUM command dispatcher and on-demand system information.
+. (Join-Path $PSScriptRoot "Osmium-Fetch.ps1")
 function global:prompt {
     $path = (Get-Location).Path
     $p = "$([char]27)[38;2;190;140;255m"
@@ -164,7 +165,7 @@ function Invoke-OsmiumUpdate {
 
     Write-Host "[4/4] Installing updated OSMIUM files..." -ForegroundColor Gray
     New-Item -ItemType Directory -Force -Path $runtimePath | Out-Null
-    $allowed = @("Osmium-Banner.ps1", "Osmium-Commands.ps1")
+    $allowed = @("Osmium-Banner.ps1", "Osmium-Commands.ps1", "Osmium-Fetch.ps1")
     foreach ($name in $allowed) {
         $from = Join-Path $projectPath $name
         if (Test-Path $from) {
@@ -187,6 +188,7 @@ function global:osmium {
             Write-Host " osmium -h       Display this help menu" -ForegroundColor White
             Write-Host " osmium -sys     Open live system monitor" -ForegroundColor White
             Write-Host " osmium -update  Update OSMIUM from GitHub" -ForegroundColor White
+            Write-Host " osmium -fetch   Display system information" -ForegroundColor White
             Write-Host " exit            Close the PowerShell session" -ForegroundColor White
             Write-Host ""
             Write-Host " More commands will be added here." -ForegroundColor DarkGray
@@ -200,6 +202,9 @@ function global:osmium {
             catch { Write-Host $_ -ForegroundColor Red }
             finally { Write-Host "`nOSMIUM monitor stopped." -ForegroundColor Magenta }
         }
+        "-fetch" {
+            Show-OsmiumFetch
+        }
         "-update" {
             Invoke-OsmiumUpdate
         }
@@ -209,6 +214,7 @@ function global:osmium {
         }
     }
 }
+
 
 
 
